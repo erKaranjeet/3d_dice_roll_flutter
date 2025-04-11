@@ -60,6 +60,9 @@ class _Dice3DRollerState extends State<Dice3DRoller> with SingleTickerProviderSt
     6: [[pi, 0, 0], [-pi, 0, 0], [pi, pi, 0], [0, pi, pi]],
   };
 
+  // Add a threshold for face detection
+  static const double _faceDetectionThreshold = 0.95;
+
   @override
   void initState() {
     super.initState();
@@ -125,9 +128,11 @@ class _Dice3DRollerState extends State<Dice3DRoller> with SingleTickerProviderSt
     // Add some additional rotations for a dramatic effect (multiple spins)
     final additionalSpins = 2 + _random.nextInt(3); // 2-4 additional spins
 
-    final endX = _finalRotX + (2 * pi * additionalSpins) + (_random.nextDouble() * pi / 8);
-    final endY = _finalRotY + (2 * pi * additionalSpins) + (_random.nextDouble() * pi / 8);
-    final endZ = _finalRotZ + (2 * pi * additionalSpins) + (_random.nextDouble() * pi / 8);
+    // Add slight randomization to the final rotation for more natural movement
+    final randomOffset = _random.nextDouble() * pi / 8;
+    final endX = _finalRotX + (2 * pi * additionalSpins) + randomOffset;
+    final endY = _finalRotY + (2 * pi * additionalSpins) + randomOffset;
+    final endZ = _finalRotZ + (2 * pi * additionalSpins) + randomOffset;
 
     _rotationX = Tween<double>(begin: 0, end: endX).animate(
       CurvedAnimation(
@@ -150,7 +155,7 @@ class _Dice3DRollerState extends State<Dice3DRoller> with SingleTickerProviderSt
       ),
     );
 
-    // Bounce animation for realistic landing
+    // Improved bounce animation for more realistic landing
     _bounceAnimation = TweenSequence<double>([
       TweenSequenceItem(
         tween: Tween<double>(begin: 0.0, end: -40.0),
@@ -268,85 +273,95 @@ class _Dice3DRollerState extends State<Dice3DRoller> with SingleTickerProviderSt
     final currentRotY = _controller.isAnimating ? _rotationY.value : _finalRotY;
     final currentRotZ = _controller.isAnimating ? _rotationZ.value : _finalRotZ;
 
-    // Normalize rotations for z-order calculations
-    final double normalizedRotX = currentRotX % (2 * pi);
-    final double normalizedRotY = currentRotY % (2 * pi);
-    final double normalizedRotZ = currentRotZ % (2 * pi);
+    // Create a list of all 6 face positions (3D points) relative to dice center
+    final List<Vector3> facePositions = [
+      Vector3(0, 0, halfSize),     // front
+      Vector3(0, 0, -halfSize),    // back
+      Vector3(halfSize, 0, 0),     // right
+      Vector3(-halfSize, 0, 0),    // left
+      Vector3(0, -halfSize, 0),    // top
+      Vector3(0, halfSize, 0),     // bottom
+    ];
 
-    // Calculate visibility factors based on current rotations
-    final frontBackFactor = cos(normalizedRotY);
-    final leftRightFactor = cos(normalizedRotX);
-    final topBottomFactor = cos(normalizedRotZ);
+    // Create rotation matrix from current rotations
+    final Matrix4 rotationMatrix = Matrix4.identity()
+      ..rotateX(currentRotX)
+      ..rotateY(currentRotY)
+      ..rotateZ(currentRotZ);
 
-    // Calculate the Z-order based on rotations
-    final Map<String, double> zOrder = {
-      'front': frontBackFactor,
-      'back': -frontBackFactor,
-      'right': leftRightFactor,
-      'left': -leftRightFactor,
-      'top': topBottomFactor,
-      'bottom': -topBottomFactor,
-    };
+    // Calculate z-distance of each face after rotation
+    final List<double> zDistances = facePositions.map((position) {
+      // Create a copy and apply rotation
+      final rotatedPosition = Vector3.copy(position)..applyMatrix4(rotationMatrix);
+      // Return Z value (depth)
+      return rotatedPosition.z;
+    }).toList();
 
-    // Sort faces by their z-order (from back to front)
-    final sortedFaces = ['front', 'back', 'right', 'left', 'top', 'bottom']
-      ..sort((a, b) => zOrder[a]!.compareTo(zOrder[b]!));
+    // Create face definitions with names and indices
+    final List<Map<String, dynamic>> faces = [
+      {'name': 'front', 'index': 0, 'z': zDistances[0]},
+      {'name': 'back', 'index': 1, 'z': zDistances[1]},
+      {'name': 'right', 'index': 2, 'z': zDistances[2]},
+      {'name': 'left', 'index': 3, 'z': zDistances[3]},
+      {'name': 'top', 'index': 4, 'z': zDistances[4]},
+      {'name': 'bottom', 'index': 5, 'z': zDistances[5]},
+    ];
+
+    // Sort faces by z-order (back to front)
+    faces.sort((a, b) => a['z'].compareTo(b['z']));
 
     // Map faces to their corresponding dice values
+    // Ensure opposite sides sum to 7 as per standard dice
     final faceValueMap = {
       'front': 1,
-      'back': 6,
+      'back': 6,  // Opposite of 1
       'right': 3,
-      'left': 4,
+      'left': 4,  // Opposite of 3
       'top': 2,
-      'bottom': 5,
+      'bottom': 5, // Opposite of 2
     };
+
+    // Determine which face is currently showing (for accurate value display)
+    if (!_controller.isAnimating) {
+      // Find the face with the highest z value (most visible)
+      final visibleFace = faces.last['name'] as String;
+      final zValue = faces.last['z'] as double;
+
+      // Only update the value if the face is clearly visible (above threshold)
+      if (zValue > _faceDetectionThreshold) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && !_controller.isAnimating) {
+            setState(() {
+              _currentValue = faceValueMap[visibleFace]!;
+            });
+          }
+        });
+      }
+    }
+
+    // Create transforms for all faces
+    final List<Matrix4> faceTransforms = [
+      Matrix4.identity()..translate(0.0, 0.0, halfSize),                   // front
+      Matrix4.identity()..translate(0.0, 0.0, -halfSize)..rotateY(pi),     // back
+      Matrix4.identity()..translate(halfSize, 0.0, 0.0)..rotateY(pi/2),    // right
+      Matrix4.identity()..translate(-halfSize, 0.0, 0.0)..rotateY(-pi/2),  // left
+      Matrix4.identity()..translate(0.0, -halfSize, 0.0)..rotateX(-pi/2),  // top
+      Matrix4.identity()..translate(0.0, halfSize, 0.0)..rotateX(pi/2),    // bottom
+    ];
 
     // Create a list to store our rendered faces in the correct order
     final List<Widget> orderedFaces = [];
 
     // Build faces in the calculated order (back to front)
-    for (final face in sortedFaces) {
-      // Create transform for each face
-      Matrix4 transform = Matrix4.identity();
+    for (final face in faces) {
+      final String faceName = face['name'] as String;
+      final int faceIndex = face['index'] as int;
 
-      switch (face) {
-        case 'front':
-          transform.translate(0.0, 0.0, halfSize);
-          break;
-        case 'back':
-          transform
-            ..translate(0.0, 0.0, -halfSize)
-            ..rotateY(pi);
-          break;
-        case 'right':
-          transform
-            ..translate(halfSize, 0.0, 0.0)
-            ..rotateY(pi/2);
-          break;
-        case 'left':
-          transform
-            ..translate(-halfSize, 0.0, 0.0)
-            ..rotateY(-pi/2);
-          break;
-        case 'top':
-          transform
-            ..translate(0.0, -halfSize, 0.0)
-            ..rotateX(-pi/2);
-          break;
-        case 'bottom':
-          transform
-            ..translate(0.0, halfSize, 0.0)
-            ..rotateX(pi/2);
-          break;
-      }
-
-      // Add face to list
       orderedFaces.add(
         Transform(
-          transform: transform,
+          transform: faceTransforms[faceIndex],
           alignment: Alignment.center,
-          child: _buildDiceFace(faceValueMap[face]!, faceSize),
+          child: _buildDiceFace(faceValueMap[faceName]!, faceSize),
         ),
       );
     }
